@@ -32,51 +32,54 @@ ALLOWED_DOC_EXTENSIONS = {".pdf", ".doc", ".docx", ".xlsx"}
 
 TEMP_DIR.mkdir(parents=True, exist_ok=True)
 
+
 def require_authorization(func: Callable[..., Awaitable[Any]]) -> Callable[..., Awaitable[Any]]:
     @functools.wraps(func)
-    async def wrapper(event: Union[Message, CallbackQuery], *args, **kwargs):
-        pool: asyncpg.Pool = kwargs.get('pool')
-        bot: Bot = kwargs.get('bot')
-        user: Optional[types.User] = None
-        chat_id: Optional[int] = None
+    async def wrapper(event: types.Update, *args, **kwargs):
+        pool: Optional[asyncpg.Pool] = None
+        user_id: Optional[int] = None
+        target_chat_id: Optional[int] = None
 
         if isinstance(event, Message):
-            user = event.from_user
-            chat_id = event.chat.id
+            message = event
+            pool = kwargs.get('pool')
+            user_id = message.from_user.id
+            target_chat_id = message.chat.id
         elif isinstance(event, CallbackQuery):
-            user = event.from_user
-            if event.message: 
-                chat_id = event.message.chat.id
+            query = event
+            pool = kwargs.get('pool')
+            user_id = query.from_user.id
+            if query.message:
+                target_chat_id = query.message.chat.id
+        else:
+            data = args[-1] if args and isinstance(args[-1], dict) else kwargs
+            pool = data.get('pool')
+            user_info = data.get('event_from_user')
+            if user_info:
+                user_id = user_info.id
 
-        if not user or not pool or not bot:
-            logger.critical(f"Could not get user, pool, or bot in require_authorization for {func.__name__}. Event type: {type(event)}")
-            if isinstance(event, CallbackQuery):
-                try: await event.answer("Internal error during authorization check.", show_alert=True)
-                except TelegramAPIError: pass
-            return 
+        if not pool or not user_id:
+            logger.error(f"Could not get pool or user_id in require_authorization decorator for {func.__name__}")
+            return None
 
-        user_record = await get_user(pool, user.id)
-
+        user_record = await get_user(pool, user_id)
         if user_record and user_record['is_authorized']:
             return await func(event, *args, **kwargs)
         else:
-            logger.warning(f"Unauthorized access attempt by user {user.id} ({user.username}) to {func.__name__}")
-
-            unauthorized_message = "Ця функція доступна тільки авторизованим користувачам."
-            reply_markup = main_menu_unauthorized
-
-            if chat_id:
+            logger.warning(f"Unauthorized access attempt by user {user_id} to {func.__name__}")
+            bot: Bot = kwargs.get('bot') or (args[0] if args and isinstance(args[0], Bot) else None)
+            if bot and target_chat_id:
                 try:
-                    await bot.send_message(chat_id, unauthorized_message, reply_markup=reply_markup)
-                except TelegramAPIError as e:
-                    logger.error(f"Failed to send unauthorized message to chat {chat_id} for user {user.id}: {e}")
-
+                    await bot.send_message(
+                        target_chat_id,
+                        "Ця функція доступна тільки авторизованим користувачам.",
+                        reply_markup=main_menu_unauthorized
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to send unauthorized message to chat {target_chat_id}: {e}")
             if isinstance(event, CallbackQuery):
-                try:
-                    await event.answer(unauthorized_message, show_alert=True)
-                except TelegramAPIError:
-                     logger.warning(f"Failed to answer callback query for unauthorized user {user.id}")
-            return 
+                await event.answer("Ця функція доступна тільки авторизованим користувачам.", show_alert=True)
+            return None
 
     return wrapper
 
